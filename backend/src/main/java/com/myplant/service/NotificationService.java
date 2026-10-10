@@ -6,10 +6,14 @@ import com.myplant.entity.Plant;
 import com.myplant.entity.User;
 import com.myplant.repository.NotificationRepository;
 import com.myplant.service.UserService;
-import lombok.AllArgsConstructor;
+import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Service;
+import com.twilio.Twilio;
+import com.twilio.rest.api.v2010.account.Message;
+import com.twilio.type.PhoneNumber;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDateTime;
 import java.util.List;
@@ -29,14 +33,22 @@ import java.util.stream.Collectors;
  * Note: WhatsApp integration would require Twilio service implementation
  */
 @Service
-@AllArgsConstructor
+@RequiredArgsConstructor
 @Transactional
 public class NotificationService {
 
     private final NotificationRepository notificationRepository;
     private final JavaMailSender mailSender;
     private final UserService userService;
-    // Future: private final TwilioWhatsAppService twilioService;
+
+    @Value("${twilio.account-sid:}")
+    private String twilioAccountSid;
+
+    @Value("${twilio.auth-token:}")
+    private String twilioAuthToken;
+
+    @Value("${twilio.whatsapp-number:}")
+    private String twilioWhatsAppNumber;
 
     /**
      * Create and send a watering reminder notification
@@ -84,7 +96,7 @@ public class NotificationService {
         // Send WhatsApp if requested (future implementation)
         if (sendWhatsApp) {
             notification.setChannel(Notification.NotificationChannel.WHATSAPP);
-            // sendWhatsAppNotification(notification);
+            sendWhatsAppNotification(notification);
         }
 
         Notification savedNotification = notificationRepository.save(notification);
@@ -115,21 +127,45 @@ public class NotificationService {
         }
     }
 
-    /**
-     * Send WhatsApp notification (placeholder for Twilio integration)
-     * 
-     * @param notification the notification to send
-     */
+    /** Send a real WhatsApp message through Twilio. A successful API response means accepted by Twilio, not necessarily delivered. */
     private void sendWhatsAppNotification(Notification notification) {
         try {
-            // Future: Use Twilio WhatsApp API
-            // twilioService.sendWhatsAppMessage(notification.getUser().getPhoneNumber(), notification.getMessage());
-            
+            if (twilioAccountSid == null || twilioAccountSid.isBlank()
+                    || twilioAuthToken == null || twilioAuthToken.isBlank()
+                    || twilioWhatsAppNumber == null || twilioWhatsAppNumber.isBlank()) {
+                throw new IllegalStateException("WhatsApp is not configured. Set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_WHATSAPP_NUMBER.");
+            }
+            User user = notification.getUser();
+            if (user.getPhoneNumber() == null || user.getPhoneNumber().isBlank()) {
+                throw new IllegalStateException("Add a phone number with country code to the user profile before enabling WhatsApp notifications.");
+            }
+            if (!Boolean.TRUE.equals(user.getWhatsappNotifications())) {
+                throw new IllegalStateException("WhatsApp notifications are disabled in the user's preferences.");
+            }
+
+            String to = user.getPhoneNumber().trim().replaceAll("\\s+", "");
+            if (!to.startsWith("whatsapp:")) {
+                if (!to.startsWith("+")) {
+                    throw new IllegalArgumentException("WhatsApp phone number must include country code, for example +91XXXXXXXXXX.");
+                }
+                to = "whatsapp:" + to;
+            }
+            String from = twilioWhatsAppNumber.trim();
+            if (!from.startsWith("whatsapp:")) from = "whatsapp:" + from;
+
+            Twilio.init(twilioAccountSid.trim(), twilioAuthToken.trim());
+            Message sent = Message.creator(new PhoneNumber(to), new PhoneNumber(from),
+                    "🌿 MyPlant Alert\n" + notification.getTitle() + "\n\n" + notification.getMessage()).create();
+
+            if (sent.getSid() == null || sent.getSid().isBlank()) {
+                throw new IllegalStateException("Twilio did not return a message identifier.");
+            }
             notification.setStatus(Notification.NotificationStatus.SENT);
             notification.setSentAt(LocalDateTime.now());
+            notification.setFailureReason(null);
         } catch (Exception e) {
             notification.setStatus(Notification.NotificationStatus.FAILED);
-            notification.setFailureReason(e.getMessage());
+            notification.setFailureReason("WhatsApp submission failed: " + e.getMessage());
         }
     }
 

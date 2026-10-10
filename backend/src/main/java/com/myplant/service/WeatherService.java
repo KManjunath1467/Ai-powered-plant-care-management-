@@ -10,6 +10,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.http.HttpStatus;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -67,7 +69,7 @@ public class WeatherService {
      */
     public WeatherDTO getWeatherForCity(String city) {
         if (city == null || city.trim().isEmpty()) {
-            city = "London";
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "A city or plant location is required for weather lookup.");
         }
         String cacheKey = "city:" + city.trim().toLowerCase();
         CachedWeather cached = weatherCache.get(cacheKey);
@@ -98,17 +100,17 @@ public class WeatherService {
             }
         }
 
-        WeatherDTO fallback = getDefaultWeather(city);
-        weatherCache.put(cacheKey, new CachedWeather(fallback));
-        return fallback;
+        throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                "Live weather is currently unavailable. No fabricated weather data was returned.");
     }
 
     /**
      * Fetch weather for specific coordinates (for precise plant location)
      */
     public WeatherDTO getWeatherForCoordinates(Double latitude, Double longitude, String label) {
-        if (latitude == null || longitude == null) {
-            return getWeatherForCity(label != null ? label : "London");
+        if (latitude == null || longitude == null || !Double.isFinite(latitude) || !Double.isFinite(longitude)
+                || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Valid latitude and longitude are required.");
         }
         String cacheKey = String.format(Locale.US, "coord:%.2f,%.2f", latitude, longitude);
         CachedWeather cached = weatherCache.get(cacheKey);
@@ -126,10 +128,8 @@ public class WeatherService {
             log.warn("Open-Meteo fetch failed for coords {},{}: {}", latitude, longitude, e.getMessage());
         }
 
-        WeatherDTO fallback = getDefaultWeather(label != null ? label : "Custom Location");
-        fallback.setLatitude(latitude);
-        fallback.setLongitude(longitude);
-        return fallback;
+        throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                "Live weather is currently unavailable for these coordinates. No fabricated weather data was returned.");
     }
 
     /**
@@ -151,9 +151,7 @@ public class WeatherService {
                 targetLat = first.path("latitude").asDouble();
                 targetLon = first.path("longitude").asDouble();
             } else {
-                // Fallback default coordinates (London)
-                targetLat = 51.5074;
-                targetLon = -0.1278;
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No matching location was found for: " + city);
             }
         }
 
@@ -171,26 +169,31 @@ public class WeatherService {
         weather.setLastUpdated(LocalDateTime.now());
 
         JsonNode current = root.path("current");
-        if (!current.isMissingNode()) {
-            double temp = current.path("temperature_2m").asDouble(22.0);
-            double humidity = current.path("relative_humidity_2m").asDouble(55.0);
-            double precipitation = current.path("precipitation").asDouble(0.0);
-            int code = current.path("weather_code").asInt(0);
-            double windSpeed = current.path("wind_speed_10m").asDouble(8.0);
-            double windDir = current.path("wind_direction_10m").asDouble(180.0);
-
-            weather.setTemperature(temp);
-            weather.setHumidity(humidity);
-            weather.setPressure(1013);
-            weather.setWindSpeed(windSpeed);
-            weather.setWindDirection(windDir);
-            weather.setRainfall(precipitation);
-            weather.setIsRaining(precipitation > 0.1 || isRainCode(code));
-
-            String condition = getWeatherConditionFromCode(code);
-            weather.setWeatherMain(condition);
-            weather.setWeatherDescription(getWeatherDescriptionFromCode(code));
+        if (current.isMissingNode()
+                || !current.path("temperature_2m").isNumber()
+                || !current.path("relative_humidity_2m").isNumber()
+                || !current.path("precipitation").isNumber()
+                || !current.path("weather_code").isNumber()
+                || !current.path("wind_speed_10m").isNumber()
+                || !current.path("wind_direction_10m").isNumber()) {
+            throw new IllegalStateException("Weather provider response is missing required current-condition fields.");
         }
+        double temp = current.path("temperature_2m").asDouble();
+        double humidity = current.path("relative_humidity_2m").asDouble();
+        double precipitation = current.path("precipitation").asDouble();
+        int code = current.path("weather_code").asInt();
+        double windSpeed = current.path("wind_speed_10m").asDouble();
+        double windDir = current.path("wind_direction_10m").asDouble();
+
+        weather.setTemperature(temp);
+        weather.setHumidity(humidity);
+        // Pressure is not requested from Open-Meteo here; leave it null instead of inventing 1013 hPa.
+        weather.setWindSpeed(windSpeed);
+        weather.setWindDirection(windDir);
+        weather.setRainfall(precipitation);
+        weather.setIsRaining(precipitation > 0.1 || isRainCode(code));
+        weather.setWeatherMain(getWeatherConditionFromCode(code));
+        weather.setWeatherDescription(getWeatherDescriptionFromCode(code));
 
         // Parse hourly forecast (next 24 hours)
         JsonNode hourly = root.path("hourly");
@@ -248,11 +251,15 @@ public class WeatherService {
         String response = restTemplate.getForObject(url, String.class);
         JsonNode root = objectMapper.readTree(response);
 
+        JsonNode main = root.path("main");
+        if (!main.path("temp").isNumber() || !main.path("humidity").isNumber() || !main.path("pressure").isNumber()) {
+            throw new IllegalStateException("OpenWeatherMap response is missing required current-condition fields.");
+        }
         WeatherDTO weather = new WeatherDTO();
         weather.setCity(city);
-        weather.setTemperature(root.path("main").path("temp").asDouble(24.0));
-        weather.setHumidity(root.path("main").path("humidity").asDouble(60.0));
-        weather.setPressure(root.path("main").path("pressure").asInt(1013));
+        weather.setTemperature(main.path("temp").asDouble());
+        weather.setHumidity(main.path("humidity").asDouble());
+        weather.setPressure(main.path("pressure").asInt());
 
         JsonNode weatherArr = root.path("weather");
         if (weatherArr.isArray() && weatherArr.size() > 0) {
@@ -367,22 +374,6 @@ public class WeatherService {
         return "Ideal ambient climate for healthy vegetative vitality.";
     }
 
-    private WeatherDTO getDefaultWeather(String city) {
-        WeatherDTO weather = new WeatherDTO();
-        weather.setCity(city != null ? city : "London");
-        weather.setTemperature(22.5);
-        weather.setHumidity(58.0);
-        weather.setPressure(1013);
-        weather.setWindSpeed(9.5);
-        weather.setWindDirection(210.0);
-        weather.setRainfall(0.0);
-        weather.setPrecipitationProbability(10);
-        weather.setIsRaining(false);
-        weather.setWeatherMain("Clear");
-        weather.setWeatherDescription("Clear sunny skies");
-        weather.setLastUpdated(LocalDateTime.now());
-        return weather;
-    }
 
     public boolean shouldSkipWatering(WeatherDTO weather) {
         if (weather.getIsRaining() != null && weather.getIsRaining()) {

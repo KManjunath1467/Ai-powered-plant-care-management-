@@ -37,6 +37,10 @@ public class GroqAIService {
     @Value("${groq.model:${GROQ_MODEL:llama-3.3-70b-versatile}}")
     private String modelName;
 
+    // Configure a currently supported image-capable Groq model separately.
+    @Value("${groq.vision.model:${GROQ_VISION_MODEL:}}")
+    private String visionModelName;
+
     @Value("${groq.api.url:https://api.groq.com/openai/v1/chat/completions}")
     private String apiUrl;
 
@@ -141,6 +145,71 @@ public class GroqAIService {
 
         failedRequests.incrementAndGet();
         return null;
+    }
+
+    /**
+     * Identify a plant from the actual uploaded image bytes. This requires a Groq model
+     * that currently supports image inputs; configure GROQ_VISION_MODEL accordingly.
+     * It deliberately fails closed instead of guessing from the filename.
+     */
+    public Map<String, Object> identifyPlantFromImage(byte[] imageBytes, String mimeType, String plantNameHint) {
+        if (!isConfigured()) {
+            throw new IllegalStateException("Groq is not configured. Set GROQ_API_KEY.");
+        }
+        if (visionModelName == null || visionModelName.isBlank()) {
+            throw new IllegalStateException("Image identification is not configured. Set GROQ_VISION_MODEL to a supported vision model.");
+        }
+        if (imageBytes == null || imageBytes.length == 0) {
+            throw new IllegalArgumentException("An image is required for plant identification.");
+        }
+        String safeMime = (mimeType == null) ? "" : mimeType.toLowerCase(Locale.ROOT);
+        if (!List.of("image/jpeg", "image/png", "image/webp").contains(safeMime)) {
+            throw new IllegalArgumentException("Unsupported image type. Upload JPEG, PNG, or WebP.");
+        }
+        String dataUrl = "data:" + safeMime + ";base64," + Base64.getEncoder().encodeToString(imageBytes);
+        String hint = (plantNameHint == null || plantNameHint.isBlank())
+                ? "No plant name hint was provided."
+                : "User-provided plant name hint (not proof): " + plantNameHint.trim();
+        String instruction = "Identify the plant visible in this image. " + hint + " " +
+                "Return only valid JSON with keys commonName, scientificName, plantFamily, possibleSpecies, " +
+                "identificationConfidence (one of low, medium, high), confidenceReason, visibleObservations, " +
+                "sunlightNeeds, wateringNeeds, soilPreferences, humidityNeeds, toxicityInfo, generalCareSummary. " +
+                "Do not infer identity from a filename. Do not claim certainty if the image is ambiguous. " +
+                "If no plant is visible, set commonName to Unknown and identificationConfidence to low. " +
+                "Do not return a numeric confidence percentage.";
+
+        Map<String, Object> imagePart = Map.of("type", "image_url", "image_url", Map.of("url", dataUrl));
+        Map<String, Object> textPart = Map.of("type", "text", "text", instruction);
+        Map<String, Object> userMessage = Map.of("role", "user", "content", List.of(textPart, imagePart));
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("model", visionModelName.trim());
+        payload.put("temperature", 0.1);
+        payload.put("messages", List.of(
+                Map.of("role", "system", "content", "You are a careful botanical image identification assistant. Return valid JSON only and be explicit about uncertainty."),
+                userMessage));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(apiKey.trim());
+        try {
+            ResponseEntity<String> response = restTemplate.exchange(apiUrl, HttpMethod.POST,
+                    new HttpEntity<>(payload, headers), String.class);
+            JsonNode root = objectMapper.readTree(response.getBody());
+            String content = root.path("choices").path(0).path("message").path("content").asText();
+            if (content == null || content.isBlank()) {
+                throw new IllegalStateException("Vision provider returned an empty response.");
+            }
+            String cleaned = content.trim().replaceAll("^```(?:json)?\\s*", "").replaceAll("\\s*```$", "");
+            return objectMapper.readValue(cleaned, new TypeReference<Map<String, Object>>() {});
+        } catch (HttpStatusCodeException ex) {
+            log.warn("Groq vision request failed with HTTP status {}", ex.getStatusCode());
+            throw new IllegalStateException("Plant image analysis provider returned HTTP " + ex.getStatusCode().value() + ". Check GROQ_VISION_MODEL and API access.");
+        } catch (IllegalArgumentException | IllegalStateException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            log.warn("Groq vision response could not be processed: {}", ex.getMessage());
+            throw new IllegalStateException("Plant image analysis failed. Verify the vision model supports image input and returns JSON.");
+        }
     }
 
     /**

@@ -123,7 +123,11 @@ public class SensorController {
             @PathVariable String deviceId,
             @RequestBody Map<String, Object> body) {
 
-        String pairingToken = (String) body.get("pairingToken");
+        Object tokenValue = body.get("pairingToken");
+        String pairingToken = tokenValue == null ? null : tokenValue.toString();
+        if (pairingToken == null || pairingToken.isBlank()) {
+            throw new org.springframework.security.access.AccessDeniedException("pairingToken is required.");
+        }
 
         Double soilMoisture = body.get("soilMoisture") != null ? Double.parseDouble(body.get("soilMoisture").toString()) : null;
         Double soilTemperature = body.get("soilTemperature") != null ? Double.parseDouble(body.get("soilTemperature").toString()) : null;

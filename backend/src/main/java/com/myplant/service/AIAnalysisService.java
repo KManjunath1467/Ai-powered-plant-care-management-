@@ -8,109 +8,100 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
 import java.util.*;
 
-/**
- * AIAnalysisService - Coordinates plant identification, botanical classification,
- * and anatomy explanations powered by Groq LLM intelligence.
- */
+/** Plant identification based on actual image bytes, followed by Groq explanations. */
 @Service
 @AllArgsConstructor
 @Slf4j
 public class AIAnalysisService {
-
     private final PlantCareRuleRepository plantCareRuleRepository;
     private final GroqAIService groqAIService;
 
-    /**
-     * Analyze uploaded plant image or hints with Groq LLM botanical intelligence
-     */
     public Map<String, Object> analyzePlantImage(MultipartFile image, String plantName, Long userId) {
-        Map<String, Object> result = new HashMap<>();
-
-        // Determine candidate plant name
-        String candidateName = "Monstera";
-        if (plantName != null && !plantName.trim().isEmpty()) {
-            candidateName = plantName.trim();
-        } else if (image != null && image.getOriginalFilename() != null) {
-            String filename = image.getOriginalFilename().toLowerCase();
-            if (filename.contains("snake")) candidateName = "Snake Plant";
-            else if (filename.contains("pothos")) candidateName = "Pothos";
-            else if (filename.contains("peace") || filename.contains("lily")) candidateName = "Peace Lily";
-            else if (filename.contains("spider")) candidateName = "Spider Plant";
-            else if (filename.contains("zz")) candidateName = "ZZ Plant";
-            else if (filename.contains("fiddle")) candidateName = "Fiddle Leaf Fig";
-            else if (filename.contains("aloe")) candidateName = "Aloe Vera";
-            else if (filename.contains("basil")) candidateName = "Basil";
+        if (image == null || image.isEmpty()) {
+            throw new IllegalArgumentException("Upload a plant photograph first.");
+        }
+        if (image.getSize() > 10 * 1024 * 1024) {
+            throw new IllegalArgumentException("Image must be 10 MB or smaller.");
+        }
+        String mime = image.getContentType();
+        if (mime == null || !List.of("image/jpeg", "image/png", "image/webp").contains(mime.toLowerCase(Locale.ROOT))) {
+            throw new IllegalArgumentException("Unsupported image type. Upload JPEG, PNG, or WebP.");
         }
 
-        // 1. Groq botanical taxonomy explanation
-        Map<String, Object> groqTaxonomy = groqAIService.explainPlantIdentification(
-                candidateName,
-                image != null ? "Image file: " + image.getOriginalFilename() + ", size: " + image.getSize() + " bytes" : "Manual botanical prompt"
-        );
+        final Map<String, Object> identification;
+        try {
+            identification = groqAIService.identifyPlantFromImage(image.getBytes(), mime, plantName);
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Could not read the uploaded image.", ex);
+        }
 
-        String scientificName = (String) groqTaxonomy.getOrDefault("scientificName", candidateName + " sp.");
-        String plantFamily = (String) groqTaxonomy.getOrDefault("plantFamily", "Angiosperms");
+        String candidateName = stringValue(identification.get("commonName"), "Unknown plant");
+        String scientificName = stringValue(identification.get("scientificName"), "Unknown");
+        String plantFamily = stringValue(identification.get("plantFamily"), "Unknown");
+        if (candidateName.equalsIgnoreCase("Unknown") || candidateName.equalsIgnoreCase("Unknown plant")) {
+            throw new IllegalArgumentException("The image did not contain a confidently identifiable plant. Try a clear photo of the leaves, flowers, or whole plant.");
+        }
 
-        // 2. Groq structured plant anatomy
-        Map<String, Object> groqAnatomy = groqAIService.generatePlantAnatomy(candidateName, scientificName);
-
-        // 3. Match with database care rules if available
+        Map<String, Object> taxonomy = new HashMap<>(identification);
+        Map<String, Object> anatomy = groqAIService.generatePlantAnatomy(candidateName, scientificName);
         Optional<PlantCareRule> ruleOpt = plantCareRuleRepository.findByPlantNameIgnoreCase(candidateName);
-        PlantCareRule detectedRule;
-        if (ruleOpt.isPresent()) {
-            detectedRule = ruleOpt.get();
-        } else {
-            List<PlantCareRule> all = plantCareRuleRepository.findAll();
-            detectedRule = all.isEmpty() ? createDefaultRule(candidateName) : all.get(0);
-        }
+        PlantCareRule rule = ruleOpt.orElseGet(() -> createDefaultRule(candidateName));
 
-        // Build composite response
+        Map<String, Object> care = new HashMap<>();
+        care.put("wateringSchedule", valueOr(identification.get("wateringNeeds"), rule.getWateringFrequency()));
+        care.put("sunlightNeeds", valueOr(identification.get("sunlightNeeds"), rule.getSunlightNeeds()));
+        care.put("humidityPreference", valueOr(identification.get("humidityNeeds"), rule.getHumidityPreference()));
+        care.put("temperatureRange", rule.getTemperatureRange());
+        care.put("soilPreferences", valueOr(identification.get("soilPreferences"), "Not established; verify for this species"));
+        care.put("toxicity", valueOr(identification.get("toxicityInfo"), "Unknown; verify before allowing pets or children to access the plant"));
+
+        Map<String, Object> health = new HashMap<>();
+        health.put("status", "NOT_ASSESSED");
+        health.put("message", "Plant identity was analysed, but plant health has not been assessed. Upload a clear image of affected leaves or connect sensors for a separate assessment.");
+        health.put("issues", Collections.emptyList());
+
+        Map<String, Object> result = new HashMap<>();
         result.put("candidateName", candidateName);
         result.put("scientificName", scientificName);
         result.put("plantFamily", plantFamily);
-        result.put("taxonomy", groqTaxonomy);
-        result.put("anatomy", groqAnatomy);
-        result.put("confidence", groqTaxonomy.getOrDefault("confidenceScore", 0.94));
-        result.put("detectedPlant", convertToDTO(detectedRule));
-
-        // Health initial assessment
-        Map<String, Object> healthAnalysis = new HashMap<>();
-        healthAnalysis.put("status", "Healthy");
-        healthAnalysis.put("confidence", 0.91);
-        healthAnalysis.put("issues", Collections.emptyList());
-        result.put("healthAnalysis", healthAnalysis);
-
-        // Care recommendations preview
-        Map<String, Object> careRecommendations = new HashMap<>();
-        careRecommendations.put("wateringSchedule", groqTaxonomy.getOrDefault("wateringNeeds", detectedRule.getWateringFrequency()));
-        careRecommendations.put("sunlightNeeds", groqTaxonomy.getOrDefault("sunlightNeeds", detectedRule.getSunlightNeeds()));
-        careRecommendations.put("humidityPreference", groqTaxonomy.getOrDefault("humidityNeeds", detectedRule.getHumidityPreference()));
-        careRecommendations.put("temperatureRange", detectedRule.getTemperatureRange());
-        careRecommendations.put("soilPreferences", groqTaxonomy.getOrDefault("soilPreferences", "Well-draining potting soil"));
-        careRecommendations.put("toxicity", groqTaxonomy.getOrDefault("toxicityInfo", "Keep away from pets"));
-        result.put("careRecommendations", careRecommendations);
-
-        result.put("tips", detectedRule.getCareTips());
+        result.put("taxonomy", taxonomy);
+        result.put("anatomy", anatomy);
+        result.put("confidence", valueOr(identification.get("identificationConfidence"), "unknown"));
+        result.put("confidenceReason", valueOr(identification.get("confidenceReason"), "No confidence explanation provided by the identification model."));
+        result.put("visibleObservations", valueOr(identification.get("visibleObservations"), "No observations returned."));
+        result.put("detectedPlant", convertToDTO(rule));
+        result.put("healthAnalysis", health);
+        result.put("careRecommendations", care);
+        result.put("tips", rule.getCareTips());
         result.put("groqStatus", groqAIService.getServiceStatus());
-
+        result.put("imageAnalysed", true);
         return result;
+    }
+
+    private String stringValue(Object value, String fallback) {
+        return value == null || value.toString().isBlank() ? fallback : value.toString().trim();
+    }
+
+    private Object valueOr(Object value, Object fallback) {
+        return value == null || value.toString().isBlank() ? fallback : value;
     }
 
     private PlantCareRule createDefaultRule(String name) {
         PlantCareRule rule = new PlantCareRule();
         rule.setPlantName(name);
         rule.setBaseWateringDays(7);
-        rule.setWateringFrequency("Every 7 days");
-        rule.setSunlightNeeds("Bright, indirect sunlight");
-        rule.setHumidityPreference("Moderate (50-60%)");
-        rule.setTemperatureRange("18-24°C");
-        rule.setDifficultyLevel("Beginner");
-        rule.setDescription("Resilient indoor botanical specimen.");
-        rule.setRecommendedPotSize("Medium (6-8 inches)");
-        rule.setGrowthRate("Moderate");
-        rule.setCareTips("Check soil moisture 2 inches deep before watering.");
+        rule.setWateringFrequency("Check soil moisture before watering; species-specific interval not verified");
+        rule.setSunlightNeeds("Verify species-specific light requirements");
+        rule.setHumidityPreference("Not established");
+        rule.setTemperatureRange("Not established");
+        rule.setDifficultyLevel("Unknown");
+        rule.setDescription("Care information should be verified for this identification.");
+        rule.setRecommendedPotSize("Not established");
+        rule.setGrowthRate("Unknown");
+        rule.setCareTips("Check soil moisture and verify care advice using a reliable botanical source.");
         return rule;
     }
 

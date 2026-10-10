@@ -63,7 +63,10 @@ public class SensorService {
         device.setLastActiveAt(LocalDateTime.now());
 
         SensorDevice saved = sensorDeviceRepository.save(device);
-        return toDeviceDTO(saved);
+        SensorDeviceDTO dto = toDeviceDTO(saved);
+        // One-time provisioning response. Normal list/status responses never include the token.
+        dto.setPairingToken(saved.getPairingToken());
+        return dto;
     }
 
     /**
@@ -137,9 +140,22 @@ public class SensorService {
         SensorDevice device = sensorDeviceRepository.findByDeviceId(deviceId)
                 .orElseThrow(() -> new RuntimeException("Unrecognized sensor device: " + deviceId));
 
-        // Authenticate pairing token if provided
-        if (pairingToken != null && !pairingToken.equals(device.getPairingToken())) {
-            throw new RuntimeException("Invalid sensor authentication token.");
+        // Fail closed: every telemetry request must prove possession of the device token.
+        if (pairingToken == null || pairingToken.isBlank() || !pairingToken.equals(device.getPairingToken())) {
+            throw new org.springframework.security.access.AccessDeniedException("Missing or invalid sensor authentication token.");
+        }
+        if (device.getPlant() == null || device.getStatus() == SensorDevice.DeviceStatus.UNPAIRED) {
+            throw new IllegalStateException("Sensor must be paired with a plant before sending telemetry.");
+        }
+        validateRange("soilMoisture", soilMoisture, 0.0, 100.0);
+        validateRange("soilTemperature", soilTemperature, -30.0, 100.0);
+        validateRange("soilEc", soilEc, 0.0, 100.0);
+        validateRange("soilPh", soilPh, 0.0, 14.0);
+        validateRange("ambientTemperature", ambientTemperature, -50.0, 80.0);
+        validateRange("ambientHumidity", ambientHumidity, 0.0, 100.0);
+        validateRange("lightLux", lightLux, 0.0, 200000.0);
+        if (batteryLevel != null && (batteryLevel < 0 || batteryLevel > 100)) {
+            throw new IllegalArgumentException("batteryLevel must be between 0 and 100.");
         }
 
         device.setLastActiveAt(LocalDateTime.now());
@@ -163,6 +179,12 @@ public class SensorService {
 
         SensorReading saved = sensorReadingRepository.save(reading);
         return toReadingDTO(saved);
+    }
+
+    private void validateRange(String field, Double value, double min, double max) {
+        if (value != null && (!Double.isFinite(value) || value < min || value > max)) {
+            throw new IllegalArgumentException(field + " must be between " + min + " and " + max + ".");
+        }
     }
 
     /**
