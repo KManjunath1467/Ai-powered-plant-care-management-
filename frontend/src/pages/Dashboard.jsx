@@ -100,6 +100,51 @@ export default function Dashboard() {
             ))}
           </div>
 
+          {/* Groq Intelligence Quick Actions */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <button
+              onClick={() => navigate('/identify')}
+              className="p-5 rounded-2xl bg-white border border-emerald-100 hover:border-emerald-400 shadow-sm hover:shadow-md transition-all text-left group"
+            >
+              <div className="text-xs font-bold text-emerald-700 uppercase tracking-wider mb-1 flex items-center justify-between">
+                <span>AI Photo Workflow</span>
+                <span className="text-emerald-500 group-hover:translate-x-1 transition-transform">&rarr;</span>
+              </div>
+              <div className="text-base font-bold text-gray-900">Identify Plant & Anatomy</div>
+              <p className="text-xs text-gray-500 mt-1">
+                Upload a photograph to identify taxonomy and synthesize botanical anatomy.
+              </p>
+            </button>
+
+            <button
+              onClick={() => navigate('/health-monitoring')}
+              className="p-5 rounded-2xl bg-white border border-sky-100 hover:border-sky-400 shadow-sm hover:shadow-md transition-all text-left group"
+            >
+              <div className="text-xs font-bold text-sky-700 uppercase tracking-wider mb-1 flex items-center justify-between">
+                <span>ESP32 / ESP8266</span>
+                <span className="text-sky-500 group-hover:translate-x-1 transition-transform">&rarr;</span>
+              </div>
+              <div className="text-base font-bold text-gray-900">IoT Sensor Rods</div>
+              <p className="text-xs text-gray-500 mt-1">
+                Monitor real-time soil moisture, EC, pH, and canopy temperature telemetry.
+              </p>
+            </button>
+
+            <button
+              onClick={() => navigate('/assistant')}
+              className="p-5 rounded-2xl bg-white border border-purple-100 hover:border-purple-400 shadow-sm hover:shadow-md transition-all text-left group"
+            >
+              <div className="text-xs font-bold text-purple-700 uppercase tracking-wider mb-1 flex items-center justify-between">
+                <span>Groq LLM</span>
+                <span className="text-purple-500 group-hover:translate-x-1 transition-transform">&rarr;</span>
+              </div>
+              <div className="text-base font-bold text-gray-900">AI Plant Assistant</div>
+              <p className="text-xs text-gray-500 mt-1">
+                Natural-language Q&A contextualized with your plant&apos;s sensors and forecast.
+              </p>
+            </button>
+          </div>
+
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2 space-y-6">
               <div className="card p-6">

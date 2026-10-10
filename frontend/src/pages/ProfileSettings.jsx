@@ -237,6 +237,51 @@ export default function ProfileSettings() {
                     </div>
                   </div>
                 </div>
+
+                {/* Groq Cloud LLM Configuration & Status */}
+                <div className="card p-6 bg-white space-y-4">
+                  <div className="flex items-center justify-between border-b border-gray-100 pb-3">
+                    <h3 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+                      <Shield className="w-5 h-5 text-emerald-600" />
+                      Groq Cloud LLM Integration
+                    </h3>
+                    <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700">
+                      Primary AI Provider
+                    </span>
+                  </div>
+
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-100 space-y-2 text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-500 font-semibold">Active Model:</span>
+                      <code className="font-mono text-emerald-800 font-bold bg-white px-2 py-0.5 rounded border border-gray-200">
+                        llama-3.3-70b-versatile
+                      </code>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-500 font-semibold">Key Storage:</span>
+                      <span className="text-emerald-700 font-semibold">Server-Side Environment Variable Only</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-500 font-semibold">Fallback Protection:</span>
+                      <span className="text-gray-700">Deterministic Botanical Rule Engine</span>
+                    </div>
+                  </div>
+
+                  <div className="text-xs text-gray-600 space-y-2 leading-relaxed bg-emerald-50/50 p-4 rounded-2xl border border-emerald-100">
+                    <div className="font-bold text-emerald-900">How to configure your Groq API Key:</div>
+                    <ol className="list-decimal list-inside space-y-1 text-emerald-950">
+                      <li>Obtain a free API key from the official <strong>Groq Console</strong> at <code>https://console.groq.com/keys</code>.</li>
+                      <li>In your backend environment (or <code>.env</code> file), specify:</li>
+                    </ol>
+                    <pre className="p-2.5 rounded-xl bg-slate-900 text-emerald-400 font-mono text-[11px] overflow-x-auto">
+GROQ_API_KEY=gsk_your_actual_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
+                    </pre>
+                    <p className="text-[11px] text-gray-500 italic">
+                      Security guarantee: The API key remains strictly server-side and is never returned in client network payloads.
+                    </p>
+                  </div>
+                </div>
               </div>
 
               {/* Sidebar */}
