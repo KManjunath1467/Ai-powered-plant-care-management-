@@ -8,16 +8,7 @@ import java.time.LocalDateTime;
 
 /**
  * Plant DTO
- * 
- * This DTO is used for both POST requests (creating plants) and GET responses.
- * It contains all plant information needed by the frontend for display and editing.
- * 
- * For responses, it includes:
- * - ID (set by database)
- * - Plant details
- * - Care recommendations (from linked PlantCareRule)
- * - Last watering date
- * - Watering streak
+ * Augmented with botanical, micro-location, anatomy, and IoT sensor telemetry.
  */
 @Data
 @NoArgsConstructor
@@ -26,17 +17,28 @@ public class PlantDTO {
     private Long id;
     private String name;
     private String plantType;
+    private String scientificName;
+    private String plantFamily;
     private String potSize;
     private Boolean isIndoor;
     private String location;
+    private Double latitude;
+    private Double longitude;
     private LocalDate lastWateredDate;
     private Integer wateringStreak;
     private String health;
     private String notes;
+    private String anatomyJson;
     private Integer customWateringInterval;
+    private String imageUrl;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
     
+    // IoT Sensor Status
+    private boolean hasSensor;
+    private SensorDeviceDTO sensorDevice;
+    private SensorReadingDTO latestSensorReading;
+
     // Related care rule information
     private Long plantCareRuleId;
     private String careRuleDescription;
@@ -51,4 +53,3 @@ public class PlantDTO {
     private String maxSize;
     private String careTips;
 }
-

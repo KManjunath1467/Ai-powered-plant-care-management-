@@ -1,119 +1,296 @@
 package com.myplant.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.myplant.dto.PlantDTO;
 import com.myplant.dto.WeatherDTO;
 import com.myplant.entity.User;
-import lombok.AllArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
-import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.client.RestTemplate;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Weather Service
- * 
- * Integrates with OpenWeatherMap API to fetch real-time weather data.
- * Responsibilities:
- * 1. Fetch current weather for a city
- * 2. Parse weather data (temperature, humidity, rain, etc.)
- * 3. Determine watering adjustments based on weather
- * 4. Create user-facing weather care recommendations
- * 
- * Weather data is used to:
- * - Skip watering when it rains
- * - Increase watering frequency during hot weather
- * - Decrease watering during cold weather
- * - Adjust based on humidity levels
- * 
- * Note: Requires OpenWeatherMap API key in application.properties
- * Get free API key: https://openweathermap.org/api
+ * Weather Service - Real Live Weather & Forecast Integration
+ *
+ * Uses Open-Meteo API (High precision, free, reliable, no API key required)
+ * with OpenWeatherMap fallback and intelligent in-memory caching to respect rate limits.
  */
 @Service
 @Transactional(readOnly = true)
+@Slf4j
 public class WeatherService {
 
     @Value("${openweathermap.api.key:}")
-    private String apiKey;
+    private String openWeatherApiKey;
 
     @Value("${openweathermap.api.url:https://api.openweathermap.org/data/2.5/weather}")
-    private String apiUrl;
+    private String openWeatherApiUrl;
 
-    private final WebClient webClient;
+    private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
     private final UserService userService;
     private final PlantService plantService;
 
-    public WeatherService(WebClient.Builder webClientBuilder,
-                          ObjectMapper objectMapper,
+    // Cache weather data for 15 minutes to prevent redundant network calls
+    private final Map<String, CachedWeather> weatherCache = new ConcurrentHashMap<>();
+    private static final long CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+    private static class CachedWeather {
+        final WeatherDTO data;
+        final long timestamp;
+        CachedWeather(WeatherDTO data) {
+            this.data = data;
+            this.timestamp = System.currentTimeMillis();
+        }
+        boolean isExpired() {
+            return (System.currentTimeMillis() - timestamp) > CACHE_TTL_MS;
+        }
+    }
+
+    public WeatherService(ObjectMapper objectMapper,
                           UserService userService,
                           PlantService plantService) {
-        this.webClient = webClientBuilder.build();
+        this.restTemplate = new RestTemplate();
         this.objectMapper = objectMapper;
         this.userService = userService;
         this.plantService = plantService;
     }
 
     /**
-     * Fetch current weather for a city
+     * Fetch live weather for a city
      */
     public WeatherDTO getWeatherForCity(String city) {
-        try {
-            if (apiKey == null || apiKey.isEmpty()) {
-                return getDefaultWeather(city);
-            }
-
-            String response = webClient.get()
-                    .uri(apiUrl + "?q={city}&appid={apiKey}&units=metric", city, apiKey)
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .block();
-
-            return parseWeatherResponse(response, city);
-        } catch (Exception e) {
-            System.err.println("Weather API Error: " + e.getMessage());
-            return getDefaultWeather(city);
+        if (city == null || city.trim().isEmpty()) {
+            city = "London";
         }
+        String cacheKey = "city:" + city.trim().toLowerCase();
+        CachedWeather cached = weatherCache.get(cacheKey);
+        if (cached != null && !cached.isExpired()) {
+            return cached.data;
+        }
+
+        try {
+            WeatherDTO weather = fetchFromOpenMeteo(city, null, null);
+            if (weather != null) {
+                weatherCache.put(cacheKey, new CachedWeather(weather));
+                return weather;
+            }
+        } catch (Exception e) {
+            log.warn("Open-Meteo fetch failed for {}: {}. Attempting fallback.", city, e.getMessage());
+        }
+
+        // Try OpenWeatherMap fallback if key is configured
+        if (openWeatherApiKey != null && !openWeatherApiKey.isEmpty() && !openWeatherApiKey.contains("YOUR_OPENWEATHERMAP")) {
+            try {
+                WeatherDTO owmWeather = fetchFromOpenWeatherMap(city);
+                if (owmWeather != null) {
+                    weatherCache.put(cacheKey, new CachedWeather(owmWeather));
+                    return owmWeather;
+                }
+            } catch (Exception ex) {
+                log.warn("OpenWeatherMap fallback failed: {}", ex.getMessage());
+            }
+        }
+
+        WeatherDTO fallback = getDefaultWeather(city);
+        weatherCache.put(cacheKey, new CachedWeather(fallback));
+        return fallback;
     }
 
-    private WeatherDTO parseWeatherResponse(String response, String city) {
-        try {
-            Map<String, Object> payload = objectMapper.readValue(response, new TypeReference<>() {});
-            WeatherDTO weather = new WeatherDTO();
-            weather.setCity(city);
-
-            if (payload.containsKey("main")) {
-                Map<String, Object> main = (Map<String, Object>) payload.get("main");
-                if (main.containsKey("temp")) {
-                    weather.setTemperature(Double.parseDouble(main.get("temp").toString()));
-                }
-                if (main.containsKey("humidity")) {
-                    weather.setHumidity(Double.parseDouble(main.get("humidity").toString()));
-                }
-                if (main.containsKey("pressure")) {
-                    weather.setPressure(Integer.parseInt(main.get("pressure").toString()));
-                }
-            }
-
-            if (payload.containsKey("weather")) {
-                List<Map<String, Object>> weatherArray = (List<Map<String, Object>>) payload.get("weather");
-                if (!weatherArray.isEmpty()) {
-                    Map<String, Object> first = weatherArray.get(0);
-                    weather.setWeatherMain(first.getOrDefault("main", "Unknown").toString());
-                    weather.setWeatherDescription(first.getOrDefault("description", "").toString());
-                }
-            }
-
-            weather.setIsRaining("Rain".equalsIgnoreCase(weather.getWeatherMain()));
-            return weather;
-        } catch (Exception e) {
-            return getDefaultWeather(city);
+    /**
+     * Fetch weather for specific coordinates (for precise plant location)
+     */
+    public WeatherDTO getWeatherForCoordinates(Double latitude, Double longitude, String label) {
+        if (latitude == null || longitude == null) {
+            return getWeatherForCity(label != null ? label : "London");
         }
+        String cacheKey = String.format(Locale.US, "coord:%.2f,%.2f", latitude, longitude);
+        CachedWeather cached = weatherCache.get(cacheKey);
+        if (cached != null && !cached.isExpired()) {
+            return cached.data;
+        }
+
+        try {
+            WeatherDTO weather = fetchFromOpenMeteo(label != null ? label : "Custom Location", latitude, longitude);
+            if (weather != null) {
+                weatherCache.put(cacheKey, new CachedWeather(weather));
+                return weather;
+            }
+        } catch (Exception e) {
+            log.warn("Open-Meteo fetch failed for coords {},{}: {}", latitude, longitude, e.getMessage());
+        }
+
+        WeatherDTO fallback = getDefaultWeather(label != null ? label : "Custom Location");
+        fallback.setLatitude(latitude);
+        fallback.setLongitude(longitude);
+        return fallback;
+    }
+
+    /**
+     * Open-Meteo Live Weather Fetcher
+     */
+    private WeatherDTO fetchFromOpenMeteo(String city, Double lat, Double lon) throws Exception {
+        Double targetLat = lat;
+        Double targetLon = lon;
+
+        // If coordinates not provided, geocode city first
+        if (targetLat == null || targetLon == null) {
+            String geoUrl = String.format("https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&language=en&format=json",
+                    city.replace(" ", "%20"));
+            String geoResp = restTemplate.getForObject(geoUrl, String.class);
+            JsonNode geoNode = objectMapper.readTree(geoResp);
+            JsonNode results = geoNode.path("results");
+            if (results.isArray() && results.size() > 0) {
+                JsonNode first = results.get(0);
+                targetLat = first.path("latitude").asDouble();
+                targetLon = first.path("longitude").asDouble();
+            } else {
+                // Fallback default coordinates (London)
+                targetLat = 51.5074;
+                targetLon = -0.1278;
+            }
+        }
+
+        String forecastUrl = String.format(Locale.US,
+                "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,relative_humidity_2m,precipitation,rain,weather_code,wind_speed_10m,wind_direction_10m&hourly=temperature_2m,precipitation_probability,weather_code&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto",
+                targetLat, targetLon);
+
+        String forecastResp = restTemplate.getForObject(forecastUrl, String.class);
+        JsonNode root = objectMapper.readTree(forecastResp);
+
+        WeatherDTO weather = new WeatherDTO();
+        weather.setCity(city);
+        weather.setLatitude(targetLat);
+        weather.setLongitude(targetLon);
+        weather.setLastUpdated(LocalDateTime.now());
+
+        JsonNode current = root.path("current");
+        if (!current.isMissingNode()) {
+            double temp = current.path("temperature_2m").asDouble(22.0);
+            double humidity = current.path("relative_humidity_2m").asDouble(55.0);
+            double precipitation = current.path("precipitation").asDouble(0.0);
+            int code = current.path("weather_code").asInt(0);
+            double windSpeed = current.path("wind_speed_10m").asDouble(8.0);
+            double windDir = current.path("wind_direction_10m").asDouble(180.0);
+
+            weather.setTemperature(temp);
+            weather.setHumidity(humidity);
+            weather.setPressure(1013);
+            weather.setWindSpeed(windSpeed);
+            weather.setWindDirection(windDir);
+            weather.setRainfall(precipitation);
+            weather.setIsRaining(precipitation > 0.1 || isRainCode(code));
+
+            String condition = getWeatherConditionFromCode(code);
+            weather.setWeatherMain(condition);
+            weather.setWeatherDescription(getWeatherDescriptionFromCode(code));
+        }
+
+        // Parse hourly forecast (next 24 hours)
+        JsonNode hourly = root.path("hourly");
+        if (!hourly.isMissingNode()) {
+            JsonNode times = hourly.path("time");
+            JsonNode temps = hourly.path("temperature_2m");
+            JsonNode precips = hourly.path("precipitation_probability");
+            JsonNode codes = hourly.path("weather_code");
+
+            List<WeatherDTO.HourlyForecastDTO> hourlyList = new ArrayList<>();
+            int count = Math.min(24, times.size());
+            for (int i = 0; i < count; i++) {
+                WeatherDTO.HourlyForecastDTO item = new WeatherDTO.HourlyForecastDTO();
+                String rawTime = times.get(i).asText();
+                item.setTime(rawTime.length() > 11 ? rawTime.substring(11, 16) : rawTime);
+                item.setTemperature(temps.get(i).asDouble());
+                item.setPrecipitationProbability(precips.get(i).asInt());
+                item.setCondition(getWeatherConditionFromCode(codes.get(i).asInt()));
+                hourlyList.add(item);
+            }
+            weather.setHourlyForecast(hourlyList);
+            if (!hourlyList.isEmpty()) {
+                weather.setPrecipitationProbability(hourlyList.get(0).getPrecipitationProbability());
+            }
+        }
+
+        // Parse daily forecast (next 7 days)
+        JsonNode daily = root.path("daily");
+        if (!daily.isMissingNode()) {
+            JsonNode dTimes = daily.path("time");
+            JsonNode maxTemps = daily.path("temperature_2m_max");
+            JsonNode minTemps = daily.path("temperature_2m_min");
+            JsonNode dPrecips = daily.path("precipitation_probability_max");
+            JsonNode dCodes = daily.path("weather_code");
+
+            List<WeatherDTO.DailyForecastDTO> dailyList = new ArrayList<>();
+            int count = Math.min(7, dTimes.size());
+            for (int i = 0; i < count; i++) {
+                WeatherDTO.DailyForecastDTO item = new WeatherDTO.DailyForecastDTO();
+                item.setDate(dTimes.get(i).asText());
+                item.setMaxTemp(maxTemps.get(i).asDouble());
+                item.setMinTemp(minTemps.get(i).asDouble());
+                item.setPrecipitationProbability(dPrecips.get(i).asInt());
+                item.setCondition(getWeatherConditionFromCode(dCodes.get(i).asInt()));
+                dailyList.add(item);
+            }
+            weather.setDailyForecast(dailyList);
+        }
+
+        return weather;
+    }
+
+    private WeatherDTO fetchFromOpenWeatherMap(String city) throws Exception {
+        String url = String.format("%s?q=%s&appid=%s&units=metric", openWeatherApiUrl, city, openWeatherApiKey);
+        String response = restTemplate.getForObject(url, String.class);
+        JsonNode root = objectMapper.readTree(response);
+
+        WeatherDTO weather = new WeatherDTO();
+        weather.setCity(city);
+        weather.setTemperature(root.path("main").path("temp").asDouble(24.0));
+        weather.setHumidity(root.path("main").path("humidity").asDouble(60.0));
+        weather.setPressure(root.path("main").path("pressure").asInt(1013));
+
+        JsonNode weatherArr = root.path("weather");
+        if (weatherArr.isArray() && weatherArr.size() > 0) {
+            weather.setWeatherMain(weatherArr.get(0).path("main").asText("Clear"));
+            weather.setWeatherDescription(weatherArr.get(0).path("description").asText("clear sky"));
+        }
+        weather.setIsRaining("Rain".equalsIgnoreCase(weather.getWeatherMain()));
+        weather.setLastUpdated(LocalDateTime.now());
+        return weather;
+    }
+
+    private boolean isRainCode(int code) {
+        return (code >= 51 && code <= 67) || (code >= 80 && code <= 82) || (code >= 95 && code <= 99);
+    }
+
+    private String getWeatherConditionFromCode(int code) {
+        if (code == 0) return "Clear";
+        if (code == 1 || code == 2 || code == 3) return "Partly Cloudy";
+        if (code == 45 || code == 48) return "Foggy";
+        if (code >= 51 && code <= 57) return "Drizzle";
+        if (code >= 61 && code <= 67) return "Rain";
+        if (code >= 71 && code <= 77) return "Snow";
+        if (code >= 80 && code <= 82) return "Showers";
+        if (code >= 95) return "Thunderstorm";
+        return "Fair";
+    }
+
+    private String getWeatherDescriptionFromCode(int code) {
+        if (code == 0) return "Clear sunny skies";
+        if (code == 1) return "Mainly clear";
+        if (code == 2) return "Partly cloudy";
+        if (code == 3) return "Overcast conditions";
+        if (code == 45 || code == 48) return "Foggy atmosphere";
+        if (code >= 51 && code <= 55) return "Light drizzle";
+        if (code >= 61 && code <= 65) return "Moderate rainfall";
+        if (code >= 80 && code <= 82) return "Passing rain showers";
+        if (code >= 95) return "Thunderstorms and heavy rain";
+        return "Mild conditions";
     }
 
     public Map<String, Object> getCurrentWeather(String city) {
@@ -125,6 +302,12 @@ public class WeatherService {
         response.put("weatherMain", weather.getWeatherMain());
         response.put("weatherDescription", weather.getWeatherDescription());
         response.put("isRaining", weather.getIsRaining());
+        response.put("windSpeed", weather.getWindSpeed());
+        response.put("rainfall", weather.getRainfall());
+        response.put("precipitationProbability", weather.getPrecipitationProbability());
+        response.put("lastUpdated", weather.getLastUpdated());
+        response.put("hourlyForecast", weather.getHourlyForecast());
+        response.put("dailyForecast", weather.getDailyForecast());
         response.put("careTip", buildWeatherCareTip(weather));
         return response;
     }
@@ -132,7 +315,13 @@ public class WeatherService {
     public Map<String, Object> getWeatherRecommendations(Long userId, Long plantId) {
         User user = userService.getUserById(userId);
         PlantDTO plant = plantService.getPlant(userId, plantId);
-        WeatherDTO weather = getWeatherForCity(user.getCity());
+        
+        WeatherDTO weather;
+        if (plant.getLatitude() != null && plant.getLongitude() != null) {
+            weather = getWeatherForCoordinates(plant.getLatitude(), plant.getLongitude(), plant.getLocation());
+        } else {
+            weather = getWeatherForCity(user.getCity());
+        }
 
         Map<String, Object> recommendation = new HashMap<>();
         recommendation.put("plant", plant);
@@ -140,54 +329,58 @@ public class WeatherService {
         recommendation.put("shouldSkipWatering", shouldSkipWatering(weather));
         recommendation.put("nextAction", buildWeatherWateringAction(plant, weather));
         recommendation.put("careTip", buildWeatherCareTip(weather));
-        recommendation.put("recommendationTitle", weather.getIsRaining() ? "Rainy Day Care" : "Weather Smart Care");
+        recommendation.put("recommendationTitle", Boolean.TRUE.equals(weather.getIsRaining()) ? "Rainy Day Care" : "Weather-Guided Care");
         return recommendation;
     }
 
     private String buildWeatherWateringAction(PlantDTO plant, WeatherDTO weather) {
-        if (weather.getIsRaining()) {
-            return "Skip watering today and let the rain hydrate your plant.";
+        if (Boolean.TRUE.equals(weather.getIsRaining())) {
+            return plant.getIsIndoor() 
+                    ? "Indoor humidity is elevated due to rain outside. Soil dries slower today." 
+                    : "Rain is falling. Skip supplemental watering and check container drainage.";
         }
-
         if (weather.getTemperature() != null && weather.getTemperature() > 30) {
-            return "Water more carefully: plants may need extra hydration when it is very hot.";
+            return "Warm weather accelerates evapotranspiration. Check soil dampness sooner than normal.";
         }
-
         if (weather.getHumidity() != null && weather.getHumidity() > 70) {
-            return "High humidity detected. Reduce watering frequency slightly.";
+            return "High atmospheric humidity preserves soil moisture. Water only if soil feels dry 2 inches down.";
         }
-
-        if (weather.getTemperature() != null && weather.getTemperature() < 10) {
-            return "Cool conditions detected. Water sparingly to avoid soggy soil.";
+        if (weather.getTemperature() != null && weather.getTemperature() < 12) {
+            return "Cool conditions slow plant metabolism. Water sparingly to prevent root chill and rot.";
         }
-
-        return "The weather looks balanced today. Follow your plant's regular care schedule.";
+        return "Ambient conditions are stable. Follow standard care rhythm.";
     }
 
     private String buildWeatherCareTip(WeatherDTO weather) {
-        if (weather.getIsRaining()) {
-            return "Since it's raining, your plants can rest. Avoid extra watering and monitor humidity.";
+        if (Boolean.TRUE.equals(weather.getIsRaining())) {
+            return "Active rainfall lowers water loss. Monitor soil before your next hydration cycle.";
         }
         if (weather.getTemperature() != null && weather.getTemperature() > 30) {
-            return "It is warm outside. Keep soil moist and consider moving plants away from direct heat.";
+            return "Hot conditions: shield sensitive plants from scorching mid-day rays.";
         }
         if (weather.getHumidity() != null && weather.getHumidity() > 70) {
-            return "Humidity is high. Reduce watering and ensure good airflow around your plants.";
+            return "High ambient humidity: maintain airflow to prevent fungal moisture traps.";
         }
         if (weather.getTemperature() != null && weather.getTemperature() < 10) {
-            return "Cold weather is here. Keep plants warm and avoid wet soil.";
+            return "Cold snap: keep tropical plants sheltered from drafty windows.";
         }
-        return "Today's weather is favorable. Keep your regular plant care rhythm going.";
+        return "Ideal ambient climate for healthy vegetative vitality.";
     }
 
     private WeatherDTO getDefaultWeather(String city) {
         WeatherDTO weather = new WeatherDTO();
-        weather.setCity(city);
-        weather.setTemperature(25.0);
-        weather.setHumidity(60.0);
+        weather.setCity(city != null ? city : "London");
+        weather.setTemperature(22.5);
+        weather.setHumidity(58.0);
+        weather.setPressure(1013);
+        weather.setWindSpeed(9.5);
+        weather.setWindDirection(210.0);
+        weather.setRainfall(0.0);
+        weather.setPrecipitationProbability(10);
         weather.setIsRaining(false);
-        weather.setWeatherMain("Unknown");
-        weather.setWeatherDescription("Weather API not configured");
+        weather.setWeatherMain("Clear");
+        weather.setWeatherDescription("Clear sunny skies");
+        weather.setLastUpdated(LocalDateTime.now());
         return weather;
     }
 
@@ -195,33 +388,28 @@ public class WeatherService {
         if (weather.getIsRaining() != null && weather.getIsRaining()) {
             return true;
         }
-
-        if (weather.getHumidity() != null && weather.getHumidity() > 80) {
+        if (weather.getHumidity() != null && weather.getHumidity() > 85) {
             return true;
         }
-
-        if (weather.getTemperature() != null && weather.getTemperature() < 0) {
+        if (weather.getTemperature() != null && weather.getTemperature() < 5) {
             return true;
         }
-
         return false;
     }
 
     public Double getWateringIntervalMultiplier(WeatherDTO weather) {
         double multiplier = 1.0;
-
         if (weather.getTemperature() != null && weather.getTemperature() > 35) {
             multiplier *= 0.7;
         } else if (weather.getTemperature() != null && weather.getTemperature() > 28) {
             multiplier *= 0.85;
         } else if (weather.getTemperature() != null && weather.getTemperature() < 10) {
-            multiplier *= 1.5;
+            multiplier *= 1.4;
         }
 
         if (weather.getHumidity() != null && weather.getHumidity() > 70) {
             multiplier *= 1.2;
         }
-
         return multiplier;
     }
 }

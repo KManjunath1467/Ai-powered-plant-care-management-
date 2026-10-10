@@ -115,7 +115,11 @@ public class SecurityConfig {
 
                                 // IMAGE UPLOAD API
                                 "/api/plants/*/upload-image",
-                                "/api/plants/*/upload"
+                                "/api/plants/*/upload",
+
+                                // IOT SENSOR READING INGESTION
+                                "/api/sensors/*/readings",
+                                "/api/sensors/**/readings"
 
                         ).permitAll()
 
